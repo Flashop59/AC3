@@ -131,14 +131,20 @@ def process_csv_data(gps_data, show_hull_points):
         color = 'blue' if row['field_id'] in valid_fields else 'red'
         folium.CircleMarker(location=[row['lat'], row['lng']], radius=2, color=color, fill=True).add_to(m)
 
-    if show_hull_points:
-        for field_id in valid_fields:
-            points = fields[fields['field_id'] == field_id][['lat', 'lng']].values
-            hull_shape = alphashape.alphashape(points, 0.0001)
-            if isinstance(hull_shape, Polygon):
-                folium.Polygon(locations=[[pt[1], pt[0]] for pt in hull_shape.exterior.coords], color='green', fill=True, fill_opacity=0.5).add_to(m)
-                more_pts = generate_more_hull_points(hull_shape)
-                folium.PolyLine(locations=[[pt[1], pt[0]] for pt in more_pts], color='yellow', weight=2).add_to(m)
+   if show_hull_points:
+    for field_id in valid_fields:
+        points = fields[fields['field_id'] == field_id][['lat', 'lng']].values
+        if len(points) < 4:
+            continue
+        try:
+            alpha_shape = alphashape.alphashape(points, 0.01)
+            if alpha_shape.geom_type == 'Polygon':
+                hull_pts = np.array(alpha_shape.exterior.coords)
+                folium.Polygon(locations=hull_pts.tolist(), color='green', fill=True, fill_opacity=0.5).add_to(m)
+                more_pts = generate_more_hull_points(hull_pts)
+                folium.PolyLine(locations=more_pts.tolist(), color='yellow', weight=2).add_to(m)
+        except Exception as e:
+            print(f"Failed to compute concave hull for field {field_id}: {e}")
 
     return m, combined_df, total_area, total_time, total_travel_distance, total_travel_time
 
