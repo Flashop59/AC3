@@ -7,3 +7,5 @@ scipy
 folium
 geopy
 alphashape
+streamlit-folium
+triangle
