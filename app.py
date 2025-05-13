@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from shapely.geometry import Polygon, MultiPoint
-from shapely.ops import cascaded_union, polygonize
+from shapely.ops import unary_union, polygonize
 from sklearn.cluster import DBSCAN
 from scipy.spatial import Delaunay
 import folium
