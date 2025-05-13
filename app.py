@@ -1,185 +1,86 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from shapely.geometry import Polygon, MultiPoint
-from sklearn.cluster import DBSCAN
-import alphashape
 import folium
-from folium import plugins
-from geopy.distance import geodesic
-from datetime import datetime
+from streamlit_folium import folium_static
+from shapely.geometry import Polygon
+import alphashape
 
-# Functions
-def calculate_concave_hull_area(points, alpha=0.0001):
-    if len(points) < 4:
-        return 0
-    try:
-        shape = alphashape.alphashape(points, alpha)
-        if shape and isinstance(shape, Polygon):
-            return shape.area
-        elif isinstance(shape, MultiPoint):
-            return 0
-        else:
-            return 0
-    except Exception:
-        return 0
+# Load CSV file
+uploaded_file = st.file_uploader("Upload a CSV file", type=["csv"])
+if uploaded_file is not None:
+    df = pd.read_csv(uploaded_file)
 
-def calculate_centroid(points):
-    return np.mean(points, axis=0)
+    if 'field_id' not in df.columns or 'lat' not in df.columns or 'lng' not in df.columns:
+        st.error("CSV must contain 'field_id', 'lat', and 'lng' columns.")
+        st.stop()
 
-def generate_more_hull_points(polygon, num_splits=3):
-    new_points = []
-    coords = list(polygon.exterior.coords)
-    for i in range(len(coords) - 1):
-        start_point = np.array(coords[i])
-        end_point = np.array(coords[i + 1])
-        new_points.append(start_point)
-        for j in range(1, num_splits):
-            intermediate_point = start_point + j * (end_point - start_point) / num_splits
-            new_points.append(intermediate_point)
-    return np.array(new_points)
-
-def process_csv_data(gps_data, show_hull_points):
-    gps_data['Timestamp'] = pd.to_datetime(gps_data['time'], unit='ms')
-    gps_data['lat'] = gps_data['lat'].astype(float)
-    gps_data['lng'] = gps_data['lon'].astype(float)
-
-    coords = gps_data[['lat', 'lng']].values
-    db = DBSCAN(eps=0.00003, min_samples=12).fit(coords)
-    gps_data['field_id'] = db.labels_
-
-    fields = gps_data[gps_data['field_id'] != -1]
-    field_areas = fields.groupby('field_id').apply(lambda df: calculate_concave_hull_area(df[['lat', 'lng']].values))
-    field_areas_m2 = field_areas * 0.77 * (111000 ** 2)
-    field_areas_gunthas = field_areas_m2 / 101.17
-
-    field_times = fields.groupby('field_id').apply(
-        lambda df: (df['Timestamp'].max() - df['Timestamp'].min()).total_seconds() / 60.0
+    # Sidebar filter
+    st.sidebar.header("Filters")
+    selected_fields = st.sidebar.multiselect(
+        "Select field_id(s):",
+        options=df['field_id'].unique(),
+        default=df['field_id'].unique()
     )
 
-    field_dates = fields.groupby('field_id').agg(
-        start_date=('Timestamp', 'min'),
-        end_date=('Timestamp', 'max')
-    )
+    # Filtered data
+    fields = df[df['field_id'].isin(selected_fields)]
+    valid_fields = fields['field_id'].unique()
 
-    valid_fields = field_areas_gunthas[field_areas_gunthas >= 5].index
-    field_areas_gunthas = field_areas_gunthas[valid_fields]
-    field_times = field_times[valid_fields]
-    field_dates = field_dates.loc[valid_fields]
+    # Show options
+    show_points = st.sidebar.checkbox("Show Points", value=True)
+    show_hull_points = st.sidebar.checkbox("Show Hull (Concave)", value=True)
 
-    centroids = fields.groupby('field_id').apply(lambda df: calculate_centroid(df[['lat', 'lng']].values))
-
-    travel_distances = []
-    travel_times = []
-    field_ids = list(valid_fields)
-
-    if len(field_ids) > 1:
-        for i in range(len(field_ids) - 1):
-            c1 = centroids.loc[field_ids[i]]
-            c2 = centroids.loc[field_ids[i + 1]]
-            distance = geodesic(c1, c2).kilometers
-            time = (field_dates.loc[field_ids[i + 1], 'start_date'] - field_dates.loc[field_ids[i], 'end_date']).total_seconds() / 60.0
-            travel_distances.append(distance)
-            travel_times.append(time)
-
-        for i in range(len(field_ids) - 1):
-            end = fields[fields['field_id'] == field_ids[i]][['lat', 'lng']].values[-1]
-            start = fields[fields['field_id'] == field_ids[i + 1]][['lat', 'lng']].values[0]
-            dist = geodesic(end, start).kilometers
-            time = (field_dates.loc[field_ids[i + 1], 'start_date'] - field_dates.loc[field_ids[i], 'end_date']).total_seconds() / 60.0
-            travel_distances.append(dist)
-            travel_times.append(time)
-
-        travel_distances.append(np.nan)
-        travel_times.append(np.nan)
+    # Base map
+    if not fields.empty:
+        map_center = [fields['lat'].mean(), fields['lng'].mean()]
     else:
-        travel_distances.append(np.nan)
-        travel_times.append(np.nan)
+        map_center = [19.0, 72.0]
 
-    if len(travel_distances) != len(field_areas_gunthas):
-        travel_distances = travel_distances[:len(field_areas_gunthas)]
-        travel_times = travel_times[:len(field_areas_gunthas)]
-
-    combined_df = pd.DataFrame({
-        'Field ID': field_areas_gunthas.index,
-        'Area (Gunthas)': field_areas_gunthas.values,
-        'Time (Minutes)': field_times.values,
-        'Start Date': field_dates['start_date'].values,
-        'End Date': field_dates['end_date'].values,
-        'Travel Distance to Next Field (km)': travel_distances,
-        'Travel Time to Next Field (minutes)': travel_times
-    })
-
-    total_area = field_areas_gunthas.sum()
-    total_time = field_times.sum()
-    total_travel_distance = np.nansum(travel_distances)
-    total_travel_time = np.nansum(travel_times)
-
-    map_center = [gps_data['lat'].mean(), gps_data['lng'].mean()]
     m = folium.Map(location=map_center, zoom_start=12)
 
-    folium.TileLayer(
-        tiles='https://api.mapbox.com/styles/v1/mapbox/satellite-v9/tiles/256/{z}/{x}/{y}?access_token=pk.eyJ1IjoiZmxhc2hvcDAwNyIsImEiOiJjbHo5NzkycmIwN2RxMmtzZHZvNWpjYmQ2In0.A_FZYl5zKjwSZpJuP_MHiA',
-        attr='Mapbox Satellite',
-        name='Satellite',
-        overlay=True,
-        control=True
-    ).add_to(m)
-    plugins.Fullscreen().add_to(m)
+    def generate_more_hull_points(hull_points):
+        """Linear interpolation between hull points to generate smoother polygon edges."""
+        more_pts = []
+        for i in range(len(hull_points)):
+            pt1 = hull_points[i]
+            pt2 = hull_points[(i + 1) % len(hull_points)]
+            steps = 10
+            for j in range(steps):
+                lat = pt1[0] + (pt2[0] - pt1[0]) * j / steps
+                lng = pt1[1] + (pt2[1] - pt1[1]) * j / steps
+                more_pts.append([lat, lng])
+        return np.array(more_pts)
 
-    for _, row in gps_data.iterrows():
-        color = 'blue' if row['field_id'] in valid_fields else 'red'
-        folium.CircleMarker(location=[row['lat'], row['lng']], radius=2, color=color, fill=True).add_to(m)
+    # Show original points
+    if show_points:
+        for field_id in valid_fields:
+            points = fields[fields['field_id'] == field_id][['lat', 'lng']].values
+            for lat, lng in points:
+                folium.CircleMarker(
+                    location=[lat, lng],
+                    radius=3,
+                    color='blue',
+                    fill=True,
+                    fill_opacity=0.6,
+                    popup=str(field_id)
+                ).add_to(m)
 
-   if show_hull_points:
-    for field_id in valid_fields:
-        points = fields[fields['field_id'] == field_id][['lat', 'lng']].values
-        if len(points) < 4:
-            continue
-        try:
-            alpha_shape = alphashape.alphashape(points, 0.01)
-            if alpha_shape.geom_type == 'Polygon':
-                hull_pts = np.array(alpha_shape.exterior.coords)
-                folium.Polygon(locations=hull_pts.tolist(), color='green', fill=True, fill_opacity=0.5).add_to(m)
-                more_pts = generate_more_hull_points(hull_pts)
-                folium.PolyLine(locations=more_pts.tolist(), color='yellow', weight=2).add_to(m)
-        except Exception as e:
-            print(f"Failed to compute concave hull for field {field_id}: {e}")
+    # Show concave hull
+    if show_hull_points:
+        for field_id in valid_fields:
+            points = fields[fields['field_id'] == field_id][['lat', 'lng']].values
+            if len(points) < 4:
+                continue
+            try:
+                alpha_shape = alphashape.alphashape(points, 0.01)
+                if alpha_shape.geom_type == 'Polygon':
+                    hull_pts = np.array(alpha_shape.exterior.coords)
+                    folium.Polygon(locations=hull_pts.tolist(), color='green', fill=True, fill_opacity=0.5).add_to(m)
+                    more_pts = generate_more_hull_points(hull_pts)
+                    folium.PolyLine(locations=more_pts.tolist(), color='yellow', weight=2).add_to(m)
+            except Exception as e:
+                print(f"Failed to compute hull for field {field_id}: {e}")
 
-    return m, combined_df, total_area, total_time, total_travel_distance, total_travel_time
-
-# Streamlit App
-def main():
-    st.title("Field CSV Analyzer with Area & Travel Metrics (Concave Hull)")
-
-    uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
-    show_hull_points = st.checkbox("Show Hull Points", value=False)
-
-    if uploaded_file:
-        gps_data = pd.read_csv(uploaded_file)
-
-        required_columns = {'lat', 'lon', 'time'}
-        if not required_columns.issubset(gps_data.columns):
-            st.error("CSV must contain columns: lat, lon, time (time in ms).")
-            return
-
-        m, df, total_area, total_time, total_travel_dist, total_travel_time = process_csv_data(gps_data, show_hull_points)
-
-        st.success("Analysis Completed.")
-        st.subheader("Field Data Summary")
-        st.dataframe(df)
-
-        st.subheader("Total Metrics")
-        st.markdown(f"**Total Area:** {total_area:.2f} gunthas")
-        st.markdown(f"**Total Time:** {total_time:.2f} minutes")
-        st.markdown(f"**Total Travel Distance:** {total_travel_dist:.2f} km")
-        st.markdown(f"**Total Travel Time:** {total_travel_time:.2f} minutes")
-
-        st.subheader("Field Map")
-        folium_static(m)
-
-# For folium map rendering in Streamlit
-from streamlit_folium import folium_static
-
-if __name__ == "__main__":
-    main()
+    # Render map
+    folium_static(m)
