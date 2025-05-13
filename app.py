@@ -8,17 +8,16 @@ import folium
 from folium import plugins
 from geopy.distance import geodesic
 from datetime import datetime
+from streamlit_folium import folium_static
 
 # Functions
-def calculate_concave_hull_area(points, alpha=0.0001):
+def calculate_concave_hull_area(points, alpha=0.0005):
     if len(points) < 4:
         return 0
     try:
         shape = alphashape.alphashape(points, alpha)
-        if shape and isinstance(shape, Polygon):
+        if shape and shape.geom_type == 'Polygon':
             return shape.area
-        elif isinstance(shape, MultiPoint):
-            return 0
         else:
             return 0
     except Exception:
@@ -28,11 +27,11 @@ def calculate_centroid(points):
     return np.mean(points, axis=0)
 
 def generate_more_hull_points(polygon, num_splits=3):
+    coords = np.array(polygon.exterior.coords)
     new_points = []
-    coords = list(polygon.exterior.coords)
-    for i in range(len(coords) - 1):
-        start_point = np.array(coords[i])
-        end_point = np.array(coords[i + 1])
+    for i in range(len(coords) - 1):  # last point == first point
+        start_point = coords[i]
+        end_point = coords[i + 1]
         new_points.append(start_point)
         for j in range(1, num_splits):
             intermediate_point = start_point + j * (end_point - start_point) / num_splits
@@ -49,7 +48,9 @@ def process_csv_data(gps_data, show_hull_points):
     gps_data['field_id'] = db.labels_
 
     fields = gps_data[gps_data['field_id'] != -1]
-    field_areas = fields.groupby('field_id').apply(lambda df: calculate_concave_hull_area(df[['lat', 'lng']].values))
+    field_areas = fields.groupby('field_id').apply(
+        lambda df: calculate_concave_hull_area(df[['lat', 'lng']].values)
+    )
     field_areas_m2 = field_areas * 0.77 * (111000 ** 2)
     field_areas_gunthas = field_areas_m2 / 101.17
 
@@ -134,11 +135,11 @@ def process_csv_data(gps_data, show_hull_points):
     if show_hull_points:
         for field_id in valid_fields:
             points = fields[fields['field_id'] == field_id][['lat', 'lng']].values
-            hull_shape = alphashape.alphashape(points, 0.0001)
-            if isinstance(hull_shape, Polygon):
-                folium.Polygon(locations=[[pt[1], pt[0]] for pt in hull_shape.exterior.coords], color='green', fill=True, fill_opacity=0.5).add_to(m)
-                more_pts = generate_more_hull_points(hull_shape)
-                folium.PolyLine(locations=[[pt[1], pt[0]] for pt in more_pts], color='yellow', weight=2).add_to(m)
+            shape = alphashape.alphashape(points, alpha=0.0005)
+            if shape and shape.geom_type == 'Polygon':
+                folium.Polygon(locations=list(shape.exterior.coords), color='green', fill=True, fill_opacity=0.5).add_to(m)
+                more_pts = generate_more_hull_points(shape)
+                folium.PolyLine(locations=more_pts.tolist(), color='yellow', weight=2).add_to(m)
 
     return m, combined_df, total_area, total_time, total_travel_distance, total_travel_time
 
@@ -171,9 +172,6 @@ def main():
 
         st.subheader("Field Map")
         folium_static(m)
-
-# For folium map rendering in Streamlit
-from streamlit_folium import folium_static
 
 if __name__ == "__main__":
     main()
