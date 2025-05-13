@@ -1,24 +1,24 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, MultiPoint
 from sklearn.cluster import DBSCAN
-from scipy.spatial import ConvexHull
+import alphashape
 import folium
 from folium import plugins
 from geopy.distance import geodesic
 from datetime import datetime
-import alphashape
-from streamlit_folium import folium_static
 
 # Functions
-def calculate_concave_hull_area(points, alpha=0.01):
+def calculate_concave_hull_area(points, alpha=0.0001):
     if len(points) < 4:
         return 0
     try:
         shape = alphashape.alphashape(points, alpha)
-        if shape.geom_type == 'Polygon':
+        if shape and isinstance(shape, Polygon):
             return shape.area
+        elif isinstance(shape, MultiPoint):
+            return 0
         else:
             return 0
     except Exception:
@@ -27,18 +27,19 @@ def calculate_concave_hull_area(points, alpha=0.01):
 def calculate_centroid(points):
     return np.mean(points, axis=0)
 
-def generate_more_hull_points(points, num_splits=3):
+def generate_more_hull_points(polygon, num_splits=3):
     new_points = []
-    for i in range(len(points)):
-        start_point = points[i]
-        end_point = points[(i + 1) % len(points)]
+    coords = list(polygon.exterior.coords)
+    for i in range(len(coords) - 1):
+        start_point = np.array(coords[i])
+        end_point = np.array(coords[i + 1])
         new_points.append(start_point)
         for j in range(1, num_splits):
             intermediate_point = start_point + j * (end_point - start_point) / num_splits
             new_points.append(intermediate_point)
     return np.array(new_points)
 
-def process_csv_data(gps_data, show_hull_points, alpha=0.01):
+def process_csv_data(gps_data, show_hull_points):
     gps_data['Timestamp'] = pd.to_datetime(gps_data['time'], unit='ms')
     gps_data['lat'] = gps_data['lat'].astype(float)
     gps_data['lng'] = gps_data['lon'].astype(float)
@@ -48,7 +49,7 @@ def process_csv_data(gps_data, show_hull_points, alpha=0.01):
     gps_data['field_id'] = db.labels_
 
     fields = gps_data[gps_data['field_id'] != -1]
-    field_areas = fields.groupby('field_id').apply(lambda df: calculate_concave_hull_area(df[['lat', 'lng']].values, alpha))
+    field_areas = fields.groupby('field_id').apply(lambda df: calculate_concave_hull_area(df[['lat', 'lng']].values))
     field_areas_m2 = field_areas * 0.77 * (111000 ** 2)
     field_areas_gunthas = field_areas_m2 / 101.17
 
@@ -118,7 +119,7 @@ def process_csv_data(gps_data, show_hull_points, alpha=0.01):
     m = folium.Map(location=map_center, zoom_start=12)
 
     folium.TileLayer(
-            tiles='https://api.mapbox.com/styles/v1/mapbox/satellite-v9/tiles/256/{z}/{x}/{y}?access_token=pk.eyJ1IjoiZmxhc2hvcDAwNyIsImEiOiJjbHo5NzkycmIwN2RxMmtzZHZvNWpjYmQ2In0.A_FZYl5zKjwSZpJuP_MHiA',
+        tiles='https://api.mapbox.com/styles/v1/mapbox/satellite-v9/tiles/256/{z}/{x}/{y}?access_token=pk.eyJ1IjoiZmxhc2hvcDAwNyIsImEiOiJjbHo5NzkycmIwN2RxMmtzZHZvNWpjYmQ2In0.A_FZYl5zKjwSZpJuP_MHiA',
         attr='Mapbox Satellite',
         name='Satellite',
         overlay=True,
@@ -133,27 +134,20 @@ def process_csv_data(gps_data, show_hull_points, alpha=0.01):
     if show_hull_points:
         for field_id in valid_fields:
             points = fields[fields['field_id'] == field_id][['lat', 'lng']].values
-            if len(points) < 4:
-                continue
-            try:
-                shape = alphashape.alphashape(points, alpha)
-                if shape.geom_type == 'Polygon':
-                    hull_pts = np.array(shape.exterior.coords)
-                    folium.Polygon(locations=hull_pts.tolist(), color='green', fill=True, fill_opacity=0.5).add_to(m)
-                    more_pts = generate_more_hull_points(hull_pts)
-                    folium.PolyLine(locations=more_pts.tolist(), color='yellow', weight=2).add_to(m)
-            except Exception as e:
-                print(f"Failed to compute concave hull for field {field_id}: {e}")
+            hull_shape = alphashape.alphashape(points, 0.0001)
+            if isinstance(hull_shape, Polygon):
+                folium.Polygon(locations=[[pt[1], pt[0]] for pt in hull_shape.exterior.coords], color='green', fill=True, fill_opacity=0.5).add_to(m)
+                more_pts = generate_more_hull_points(hull_shape)
+                folium.PolyLine(locations=[[pt[1], pt[0]] for pt in more_pts], color='yellow', weight=2).add_to(m)
 
     return m, combined_df, total_area, total_time, total_travel_distance, total_travel_time
 
 # Streamlit App
 def main():
-    st.title("Field CSV Analyzer with Area & Travel Metrics")
+    st.title("Field CSV Analyzer with Area & Travel Metrics (Concave Hull)")
 
     uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
     show_hull_points = st.checkbox("Show Hull Points", value=False)
-    alpha = st.slider("Alpha Parameter for Concave Hull", min_value=0.001, max_value=1.0, value=0.01, step=0.001)
 
     if uploaded_file:
         gps_data = pd.read_csv(uploaded_file)
@@ -163,7 +157,7 @@ def main():
             st.error("CSV must contain columns: lat, lon, time (time in ms).")
             return
 
-        m, df, total_area, total_time, total_travel_dist, total_travel_time = process_csv_data(gps_data, show_hull_points, alpha)
+        m, df, total_area, total_time, total_travel_dist, total_travel_time = process_csv_data(gps_data, show_hull_points)
 
         st.success("Analysis Completed.")
         st.subheader("Field Data Summary")
@@ -177,6 +171,9 @@ def main():
 
         st.subheader("Field Map")
         folium_static(m)
+
+# For folium map rendering in Streamlit
+from streamlit_folium import folium_static
 
 if __name__ == "__main__":
     main()
